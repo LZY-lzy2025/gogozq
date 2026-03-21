@@ -1,6 +1,6 @@
 <?php
 // ==========================================
-// 自动化爬虫设置 (支持多分类列表，前后1小时过滤，昨日保留)
+// 自动化爬虫设置 (双分类列表，精准提取球队名，前后1小时过滤，昨日保留)
 // ==========================================
 set_time_limit(0);
 ignore_user_abort(true);
@@ -144,11 +144,26 @@ foreach ($listUrls as $listUrl) {
                 // 过滤：前后 1 小时
                 if (abs($matchTimestamp - $nowTimestamp) <= $timeWindow) {
                     preg_match('/href="([^"]+)"/i', $tag, $hrefMatch);
-                    preg_match('/title="([^"]+)"/i', $tag, $titleMatch);
                     
                     if (!empty($hrefMatch[1])) {
-                        $cleanTitle = !empty($titleMatch[1]) ? $titleMatch[1] : "未知比赛";
                         
+                        // 【核心修复】：精准定位 HTML 节点内的球队名称
+                        $homeTeam = "未知主队";
+                        $awayTeam = "未知客队";
+                        
+                        // 提取主队 (匹配 class 包含 team zhudui 的 div 里面的 p 标签)
+                        if (preg_match('/class=["\']team\s+zhudui[^"\']*["\'].*?<p>\s*([^<]+?)\s*<\/p>/is', $tag, $mHome)) {
+                            $homeTeam = trim($mHome[1]);
+                        }
+                        // 提取客队 (匹配 class 包含 team kedui 的 div 里面的 p 标签)
+                        if (preg_match('/class=["\']team\s+kedui[^"\']*["\'].*?<p>\s*([^<]+?)\s*<\/p>/is', $tag, $mAway)) {
+                            $awayTeam = trim($mAway[1]);
+                        }
+                        
+                        // 拼接标准标题
+                        $cleanTitle = $homeTeam . '-vs-' . $awayTeam;
+                        
+                        // 补齐日期后缀 (这对你步骤1的正则去重至关重要)
                         if (strpos($cleanTitle, $matchDate) === false) {
                             $cleanTitle .= "({$matchDate})";
                         }
