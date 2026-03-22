@@ -11,9 +11,6 @@ WORKDIR /app
 # 将当前目录下的所有文件复制到容器的 /app 目录
 COPY . /app
 
-# 注册定时任务
-RUN crontab /app/crontab
-
 # 赋予启动脚本执行权限
 RUN chmod +x /app/start.sh
 
