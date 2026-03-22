@@ -1,2 +1,0 @@
-# 每 30 分钟执行一次爬虫脚本
-*/10 * * * * /usr/local/bin/php /app/task.php >> /app/cron.log 2>&1
