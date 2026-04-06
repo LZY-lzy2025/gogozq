@@ -104,7 +104,8 @@ if (file_exists($m3uFile)) {
                     'diff' => abs($itemTimestamp - $nowTimestamp),
                     'is_yesterday' => $isYesterday
                 ];
-                $existingUrls[] = $url;
+                // 【改动点 1：改用哈希键值对存入已有源】
+                $existingUrls[$url] = true;
             }
             $i++; // 步进跳过 URL 行
         }
@@ -210,9 +211,12 @@ foreach ($matchesData as $index => $match) {
             $cleanM3u8Url = $scheme . '://' . $host . $path;
             $cleanM3u8Url = str_replace('adaptive', '1080p', $cleanM3u8Url);
 
-            if (in_array($cleanM3u8Url, $existingUrls)) {
+            // 【改动点 1：改用 isset 哈希查找查重，极大地提升速度】
+            if (isset($existingUrls[$cleanM3u8Url])) {
                 echo "<span style='color:orange;'>[跳过] 源已存在: {$match['title']}</span><br>\n";
                 $skipCount++;
+                // 【补充改动点 5：即使跳过也要释放当前循环产生的大变量】
+                unset($detailHtml, $m3u8Match);
                 continue; 
             }
 
@@ -227,7 +231,9 @@ foreach ($matchesData as $index => $match) {
                 'diff' => abs($match['timestamp'] - $nowTimestamp),
                 'is_yesterday' => $isYesterday
             ];
-            $existingUrls[] = $cleanM3u8Url;
+            
+            // 【改动点 1：将新增源存入哈希键值对】
+            $existingUrls[$cleanM3u8Url] = true;
 
             echo "<span style='color:green;'>[新增] 成功提取: {$match['title']}</span><br>\n";
             $successCount++;
@@ -235,6 +241,9 @@ foreach ($matchesData as $index => $match) {
     }
     // 随机延迟防封
     usleep(rand(500000, 1000000));
+    
+    // 【改动点 5：在循环末尾主动释放大文本变量的内存，防止泄露飙升】
+    unset($detailHtml, $m3u8Match);
 }
 
 // ==========================================
