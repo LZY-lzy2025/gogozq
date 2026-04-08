@@ -12,10 +12,10 @@ $currentTimeStr = date('Y-m-d H:i:s', $nowTimestamp);
 $todayDate = date('Y-m-d'); // 当天日期
 $todayStartTimestamp = strtotime($todayDate . ' 00:00:00'); // 今天0点时间戳
 
-// 【重要】定义保留底线：昨天晚上 20:00 的时间戳
+// 定义保留底线：昨天晚上 20:00 的时间戳
 $retentionCutoff = $todayStartTimestamp - (4 * 3600); 
 
-// 【修改】定义时间窗口：仅前 1.5 小时 (5400秒) 至当前时间，取消后30分钟
+// 定义时间窗口：仅前 1.5 小时 (5400秒) 至当前时间
 $timeWindowBefore = 90 * 60; // 90分钟
 
 // 日志记录函数
@@ -33,7 +33,8 @@ function getHtml($url) {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    // 加上更逼真的 UA 伪装
+    // 【优化点】增加 Accept-Encoding 支持 GZIP，能大幅加快网页下载速度
+    curl_setopt($ch, CURLOPT_ENCODING, 'gzip, deflate');
     curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); 
     curl_setopt($ch, CURLOPT_TIMEOUT, 15);
@@ -67,7 +68,8 @@ $logFile = "scraper_log.txt";
 writeLog("--- 定时抓取任务启动 ---");
 
 $allItems = [];
-$existingUrls = []; // 用来去重
+$existingUrls = []; // 用于双保险去重
+$existingTitles = []; // 【优化点】新增：用于前置拦截去重，存储已有的比赛标题
 
 if (file_exists($m3uFile)) {
     $m3uLines = file($m3uFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
@@ -104,8 +106,10 @@ if (file_exists($m3uFile)) {
                     'diff' => abs($itemTimestamp - $nowTimestamp),
                     'is_yesterday' => $isYesterday
                 ];
-                // 【改动点 1：改用哈希键值对存入已有源】
+                
                 $existingUrls[$url] = true;
+                // 【优化点】将已经存在的比赛标题记录下来，作为唯一标识
+                $existingTitles[$title] = true; 
             }
             $i++; // 步进跳过 URL 行
         }
@@ -125,6 +129,7 @@ $listUrls = [
 
 $matchesData = [];
 $tagPattern = '/<a[^>]*class="clearfix\s*"[^>]*>.*?<\/a>/is';
+$skipCount = 0; // 【优化点】记录在列表页直接拦截的数量
 
 // 遍历分类页面抓取
 foreach ($listUrls as $listUrl) {
@@ -142,13 +147,11 @@ foreach ($listUrls as $listUrl) {
                 $matchTime = $timeMatch[1];
                 $matchTimestamp = strtotime("{$matchDate} {$matchTime}:00");
                 
-                // 【核心修改】过滤：仅抓取前 1.5 小时到当前时间的比赛
+                // 过滤：仅抓取前 1.5 小时到当前时间的比赛
                 if ($matchTimestamp >= ($nowTimestamp - $timeWindowBefore) && $matchTimestamp <= $nowTimestamp) {
                     preg_match('/href="([^"]+)"/i', $tag, $hrefMatch);
                     
                     if (!empty($hrefMatch[1])) {
-                        
-                        // 精准定位 HTML 节点内的球队名称
                         $homeTeam = "未知主队";
                         $awayTeam = "未知客队";
                         
@@ -169,6 +172,17 @@ foreach ($listUrls as $listUrl) {
                             $cleanTitle .= "({$matchDate})";
                         }
 
+                        // ==========================================
+                        // 【核心优化点：前置拦截】
+                        // 如果标题已经在现有的 .m3u 中存在，说明之前抓取过，直接跳过！
+                        // 这样就彻底避免了后续再去请求详情页，极大地提升了爬虫执行速度。
+                        // ==========================================
+                        if (isset($existingTitles[$cleanTitle])) {
+                            echo "<span style='color:orange;'>[本地已存] 前置跳过无需重复抓取: {$cleanTitle}</span><br>\n";
+                            $skipCount++;
+                            continue;
+                        }
+
                         $matchesData[] = [
                             'url' => $hrefMatch[1],
                             'title' => $cleanTitle,
@@ -186,10 +200,10 @@ foreach ($listUrls as $listUrl) {
 }
 
 $totalFound = count($matchesData);
-writeLog("在规定的时间窗口（前 1.5 小时至当前时间）内，共找到 {$totalFound} 场比赛 (包含足球和篮球)，开始验证并抓取源...");
+writeLog("在规定的时间窗口内，发现 {$totalFound} 场新比赛需抓取源，另前置跳过 {$skipCount} 场已知比赛...");
 
 $successCount = 0;
-$skipCount = 0;
+$urlSkipCount = 0;
 
 // ==========================================
 // 步骤 3：遍历提取直播源并存入数组
@@ -211,11 +225,10 @@ foreach ($matchesData as $index => $match) {
             $cleanM3u8Url = $scheme . '://' . $host . $path;
             $cleanM3u8Url = str_replace('adaptive', '1080p', $cleanM3u8Url);
 
-            // 【改动点 1：改用 isset 哈希查找查重，极大地提升速度】
+            // 双保险：虽然通过标题拦截了大部分，但以防不同比赛用了同一个源，依然做一次 URL 校验
             if (isset($existingUrls[$cleanM3u8Url])) {
-                echo "<span style='color:orange;'>[跳过] 源已存在: {$match['title']}</span><br>\n";
-                $skipCount++;
-                // 【补充改动点 5：即使跳过也要释放当前循环产生的大变量】
+                echo "<span style='color:orange;'>[源已存在] 双重校验跳过: {$match['title']}</span><br>\n";
+                $urlSkipCount++;
                 unset($detailHtml, $m3u8Match);
                 continue; 
             }
@@ -232,7 +245,6 @@ foreach ($matchesData as $index => $match) {
                 'is_yesterday' => $isYesterday
             ];
             
-            // 【改动点 1：将新增源存入哈希键值对】
             $existingUrls[$cleanM3u8Url] = true;
 
             echo "<span style='color:green;'>[新增] 成功提取: {$match['title']}</span><br>\n";
@@ -242,7 +254,6 @@ foreach ($matchesData as $index => $match) {
     // 随机延迟防封
     usleep(rand(500000, 1000000));
     
-    // 【改动点 5：在循环末尾主动释放大文本变量的内存，防止泄露飙升】
     unset($detailHtml, $m3u8Match);
 }
 
@@ -284,6 +295,7 @@ if (!empty($allItems)) {
 fclose($m3uHandle);
 fclose($txtHandle);
 
-writeLog("任务完成！已遍历双分类，共新增 {$successCount} 场，跳过 {$skipCount} 场。");
+$totalSkip = $skipCount + $urlSkipCount;
+writeLog("任务完成！共新增 {$successCount} 场。前置跳过 {$skipCount} 场，源去重跳过 {$urlSkipCount} 场。");
 writeLog(str_repeat("=", 40));
 ?>
