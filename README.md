@@ -66,6 +66,29 @@ docker run --rm -p 8000:8000 -e TZ=Asia/Shanghai gogozq:latest
   ./gogozq
   ```
 
+
+### Render 使用公共 GHCR 镜像部署
+
+如果你不想让 Render 在每次部署时重新构建，可以直接拉取公共镜像：
+
+1. 先在 GitHub 仓库启用 Actions，使用 `.github/workflows/docker-publish.yml` 自动推送镜像到 GHCR。
+2. 将 GHCR 包设置为 **Public**（GitHub Packages 页面里可修改可见性）。
+3. 在 Render 创建 **Web Service** 时选择 **Docker Image**，镜像地址填：
+
+   - `ghcr.io/<你的GitHub用户名或组织>/<仓库名>:latest`
+
+4. 环境变量建议：
+   - `TZ=Asia/Shanghai`
+   - `PORT` 可不填（Render 会自动注入）
+
+也可以手动推送（本地一次性）：
+
+```bash
+docker build -t ghcr.io/<owner>/<repo>:latest .
+echo $GITHUB_TOKEN | docker login ghcr.io -u <github_username> --password-stdin
+docker push ghcr.io/<owner>/<repo>:latest
+```
+
 ### 持久化文件建议（重要）
 
 服务会写入以下文件：
