@@ -40,6 +40,46 @@ docker build -t gogozq:latest .
 docker run --rm -p 8000:8000 -e TZ=Asia/Shanghai gogozq:latest
 ```
 
+## Render 部署
+
+### 方式一：使用 Docker（推荐）
+
+1. 在 Render 创建 **Web Service**，选择当前仓库。
+2. Render 会自动识别 `Dockerfile` 并构建镜像。
+3. 在 Render 环境变量中添加：
+   - `TZ=Asia/Shanghai`
+   - （可选）`PORT`：不填也可以，Render 会自动注入。
+4. 部署后访问根路径 `/` 验证服务启动。
+
+> 说明：容器默认执行 `/app/start.sh`，脚本会启动 Go 二进制 `/app/gogozq`。
+
+### 方式二：不使用 Docker（Native Runtime）
+
+如果你在 Render 选择 Native Runtime，可配置：
+
+- **Build Command**
+  ```bash
+  go build -o gogozq ./main.go
+  ```
+- **Start Command**
+  ```bash
+  ./gogozq
+  ```
+
+### 持久化文件建议（重要）
+
+服务会写入以下文件：
+
+- `playlist.m3u`
+- `live_links.txt`
+- `scraper_log.txt`
+- `task.lock`（运行中锁文件）
+
+Render 实例重启后临时文件系统会重置。若你希望输出长期保留，建议：
+
+1. 使用 Render Disk（持久化磁盘）挂载到应用目录；或
+2. 将输出同步到对象存储（如 S3）/数据库。
+
 ## 抓取逻辑概要
 
 1. 读取历史 `playlist.m3u`，构建已存在标题与 URL 集合用于去重。
