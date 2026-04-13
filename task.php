@@ -8,20 +8,19 @@ ignore_user_abort(true);
 
 // 设置北京时间
 date_default_timezone_set('Asia/Shanghai');
-$nowTimestamp = time(); 
-$currentTimeStr = date('Y-m-d H:i:s', $nowTimestamp);
+$nowTimestamp = time();
 $todayDate = date('Y-m-d'); // 当天日期
 $todayStartTimestamp = strtotime($todayDate . ' 00:00:00'); // 今天0点时间戳
 
 // 定义保留底线：昨天晚上 20:00 的时间戳
 $retentionCutoff = $todayStartTimestamp - (4 * 3600); 
 
-// 定义时间窗口：仅前 1.5 小时 (5400秒) 至当前时间
-$timeWindowBefore = 45 * 60; // 90分钟
+// 定义时间窗口：仅前 45 分钟 (2700秒) 至当前时间
+$timeWindowBefore = 45 * 60; // 45分钟
 
 // 日志记录函数
 function writeLog($msg) {
-    global $currentTimeStr;
+    $currentTimeStr = date('Y-m-d H:i:s');
     $logEntry = "[{$currentTimeStr}] {$msg}\n";
     echo $logEntry . "<br>"; 
     file_put_contents('scraper_log.txt', $logEntry, FILE_APPEND);
@@ -40,9 +39,50 @@ function getHtml($url) {
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); 
     curl_setopt($ch, CURLOPT_TIMEOUT, 15);
     curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5); // 增加连接超时限制
+    curl_setopt($ch, CURLOPT_NOSIGNAL, true);
     $html = curl_exec($ch);
     curl_close($ch);
     return $html;
+}
+
+/**
+ * 并发请求多个页面
+ */
+function getHtmlMulti(array $urls, int $timeout = 12) {
+    $mh = curl_multi_init();
+    $handles = [];
+    $results = [];
+
+    foreach ($urls as $url) {
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_ENCODING, 'gzip, deflate');
+        curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
+        curl_setopt($ch, CURLOPT_NOSIGNAL, true);
+        curl_multi_add_handle($mh, $ch);
+        $handles[$url] = $ch;
+    }
+
+    $running = null;
+    do {
+        $status = curl_multi_exec($mh, $running);
+        if ($running && $status === CURLM_OK) {
+            curl_multi_select($mh, 1.0);
+        }
+    } while ($running && $status === CURLM_OK);
+
+    foreach ($handles as $url => $ch) {
+        $results[$url] = curl_multi_getcontent($ch) ?: '';
+        curl_multi_remove_handle($mh, $ch);
+        curl_close($ch);
+    }
+    curl_multi_close($mh);
+
+    return $results;
 }
 
 /**
@@ -68,6 +108,16 @@ $txtFile = "live_links.txt";
 $logFile = "scraper_log.txt";
 
 writeLog("--- 定时并发抓取任务启动 ---");
+
+$lockFp = fopen(__DIR__ . '/task.lock', 'c+');
+if (!$lockFp || !flock($lockFp, LOCK_EX | LOCK_NB)) {
+    writeLog("检测到已有抓取任务在运行，本次跳过，避免并发互抢资源。");
+    exit;
+}
+register_shutdown_function(function () use ($lockFp) {
+    flock($lockFp, LOCK_UN);
+    fclose($lockFp);
+});
 
 $allItems = [];
 $existingUrls = [];   // 用于双保险去重
@@ -132,10 +182,15 @@ $matchesData = [];
 $tagPattern = '/<a[^>]*class="clearfix\s*"[^>]*>.*?<\/a>/is';
 $skipCount = 0; 
 
-// 遍历分类页面抓取
+// 并发抓取分类页，减少总等待时间
+$listHtmlMap = getHtmlMulti($listUrls, 10);
 foreach ($listUrls as $listUrl) {
     writeLog("正在解析分类页面: {$listUrl}");
-    $listHtml = getHtml($listUrl);
+    $listHtml = isset($listHtmlMap[$listUrl]) ? $listHtmlMap[$listUrl] : '';
+    if ($listHtml === '') {
+        writeLog("分类页面抓取失败或超时: {$listUrl}");
+        continue;
+    }
     preg_match_all($tagPattern, $listHtml, $tagMatches);
 
     if (!empty($tagMatches[0])) {
@@ -148,7 +203,7 @@ foreach ($listUrls as $listUrl) {
                 $matchTime = $timeMatch[1];
                 $matchTimestamp = strtotime("{$matchDate} {$matchTime}:00");
                 
-                // 过滤：仅抓取前 1.5 小时到当前时间的比赛
+                // 过滤：仅抓取前 45 分钟到当前时间的比赛
                 if ($matchTimestamp >= ($nowTimestamp - $timeWindowBefore) && $matchTimestamp <= $nowTimestamp) {
                     preg_match('/href="([^"]+)"/i', $tag, $hrefMatch);
                     
@@ -192,8 +247,6 @@ foreach ($listUrls as $listUrl) {
             }
         }
     }
-    // 稍微停顿一下，防止两个列表页请求过快被拦截
-    usleep(500000); 
 }
 
 $totalFound = count($matchesData);
@@ -206,8 +259,8 @@ $urlSkipCount = 0;
 // 步骤 3：控制并发数的多线程提取 (3线程，0.5秒间隔)
 // ==========================================
 if ($totalFound > 0) {
-    $concurrencyLimit = 5;   // 最大并发数
-    $sleepInterval = 500000; // 批次间隔：0.5秒 (500000微秒)
+    $concurrencyLimit = 8;   // 最大并发数
+    $sleepInterval = 200000; // 批次间隔：0.2秒 (200000微秒)
 
     // 将需要抓取的数据按分组切割
     $matchChunks = array_chunk($matchesData, $concurrencyLimit, true);
@@ -228,6 +281,7 @@ if ($totalFound > 0) {
             curl_setopt($curlArray[$index], CURLOPT_SSL_VERIFYPEER, false);
             curl_setopt($curlArray[$index], CURLOPT_TIMEOUT, 10); 
             curl_setopt($curlArray[$index], CURLOPT_CONNECTTIMEOUT, 5); 
+            curl_setopt($curlArray[$index], CURLOPT_NOSIGNAL, true);
             
             curl_multi_add_handle($mh, $curlArray[$index]);
         }
