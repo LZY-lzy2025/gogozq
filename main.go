@@ -28,7 +28,7 @@ const (
 	logFile             = "scraper_log.txt"
 	lockFile            = "task.lock"
 	retentionHours      = 4
-	timeWindowMinutes   = 90
+	timeWindowMinutes   = 45
 	listFetchTimeout    = 10 * time.Second
 	detailFetchTimeout  = 10 * time.Second
 	maxDetailConcurrent = 10
