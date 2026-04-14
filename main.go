@@ -31,7 +31,11 @@ const (
 	timeWindowMinutes   = 45
 	listFetchTimeout    = 10 * time.Second
 	detailFetchTimeout  = 10 * time.Second
-	maxDetailConcurrent = 10
+	listFetchRetries    = 3
+	listRetryWait       = 2 * time.Second
+	detailFetchRetries  = 2
+	detailRetryWait     = 1 * time.Second
+	maxDetailConcurrent = 6
 )
 
 var (
@@ -178,7 +182,7 @@ func runScrape(ctx context.Context) error {
 	allItems, existingURLs, existingTitles := loadExistingItems(loc, now, todayStart, retentionCutoff)
 
 	listURLs := []string{baseURL + "/category/zuqiu", baseURL + "/category/lanqiu"}
-	listBodies := fetchURLs(ctx, listURLs, listFetchTimeout, 2)
+	listBodies := fetchURLs(ctx, listURLs, listFetchTimeout, 2, listFetchRetries, listRetryWait, true)
 
 	candidates := make([]matchCandidate, 0, 64)
 	skipCount := 0
@@ -208,7 +212,7 @@ func runScrape(ctx context.Context) error {
 		detailURLs = append(detailURLs, full)
 		candByURL[full] = c
 	}
-	detailBodies := fetchURLs(ctx, detailURLs, detailFetchTimeout, maxDetailConcurrent)
+	detailBodies := fetchURLs(ctx, detailURLs, detailFetchTimeout, maxDetailConcurrent, detailFetchRetries, detailRetryWait, true)
 
 	successCount := 0
 	urlSkipCount := 0
@@ -341,7 +345,22 @@ func loadExistingItems(loc *time.Location, now, todayStart, retentionCutoff time
 	return items, existingURLs, existingTitles
 }
 
-func fetchURLs(ctx context.Context, urls []string, timeout time.Duration, maxConcurrent int) map[string]string {
+func fetchURLs(
+	ctx context.Context,
+	urls []string,
+	timeout time.Duration,
+	maxConcurrent int,
+	retries int,
+	wait time.Duration,
+	logRetry bool,
+) map[string]string {
+	if retries < 1 {
+		retries = 1
+	}
+	if wait < 0 {
+		wait = 0
+	}
+
 	results := make(map[string]string, len(urls))
 	if len(urls) == 0 {
 		return results
@@ -361,29 +380,44 @@ func fetchURLs(ctx context.Context, urls []string, timeout time.Duration, maxCon
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-			if err != nil {
-				return
+
+			for attempt := 1; attempt <= retries; attempt++ {
+				req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+				if err != nil {
+					return
+				}
+				req.Header.Set("User-Agent", "Mozilla/5.0")
+				req.Header.Set("Accept-Encoding", "gzip")
+
+				resp, err := client.Do(req)
+				if err == nil {
+					body := ""
+					if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+						body, err = readMaybeGzip(resp.Body, resp.Header.Get("Content-Encoding"))
+					}
+					resp.Body.Close()
+					if err == nil && body != "" {
+						mu.Lock()
+						results[u] = body
+						mu.Unlock()
+						return
+					}
+				}
+
+				if attempt < retries && wait > 0 {
+					if logRetry {
+						appendLog(fmt.Sprintf("请求失败，等待后重试 (%d/%d)", attempt, retries))
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(wait):
+					}
+				}
 			}
-			req.Header.Set("User-Agent", "Mozilla/5.0")
-			req.Header.Set("Accept-Encoding", "gzip")
-			resp, err := client.Do(req)
-			if err != nil {
-				return
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				return
-			}
-			body, err := readMaybeGzip(resp.Body, resp.Header.Get("Content-Encoding"))
-			if err != nil {
-				return
-			}
-			mu.Lock()
-			results[u] = body
-			mu.Unlock()
 		}()
 	}
+
 	wg.Wait()
 	return results
 }
